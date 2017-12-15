@@ -15,6 +15,8 @@ preferences = { git = "https://github.com/Eh2406/preferences-rs", branch = "patc
 unicode-segmentation = "*"
 regex = "*"
 itertools = "*"
+average = "*"
+chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
 quickcheck = "*"

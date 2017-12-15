@@ -1,10 +1,13 @@
 use winapi;
 use ole32;
 use user32;
+use average::{Estimate, Variance};
+use chrono;
 
-use std::cmp::{min, max};
-use std::ptr::null_mut;
+use std::cmp::{max, min};
 use std::mem;
+use std::ptr::null_mut;
+use std::time::Instant;
 use std::ops::Range;
 
 use window::*;
@@ -48,6 +51,8 @@ pub struct SpVoice<'a> {
     rate: winapi::HWND,
     reload_settings: winapi::HWND,
     last_read: WideString,
+    last_update: Option<(Instant, Range<usize>)>,
+    us_per_utf16: Variance,
 }
 
 impl<'a> SpVoice<'a> {
@@ -68,8 +73,7 @@ impl<'a> SpVoice<'a> {
                 winapi::CLSCTX_ALL,
                 &winapi::UuidOfISpVoice,
                 &mut voice as *mut *mut winapi::ISpVoice as *mut *mut winapi::c_void,
-            ))
-            {
+            )) {
                 panic!("failed for SpVoice at CoCreateInstance");
             }
             let mut out = Box::new(SpVoice {
@@ -79,6 +83,8 @@ impl<'a> SpVoice<'a> {
                 rate: null_mut(),
                 reload_settings: null_mut(),
                 last_read: WideString::new(),
+                last_update: None,
+                us_per_utf16: Variance::new(),
             });
 
             let window_class_name: WideString = "SAPI_event_window_class_name".into();
@@ -115,10 +121,10 @@ impl<'a> SpVoice<'a> {
                 winapi::WS_EX_CLIENTEDGE,
                 wide_edit.as_ptr(),
                 &0u16,
-                winapi::WS_CHILD | winapi::WS_VISIBLE | winapi::WS_VSCROLL |
-                    winapi::WS_BORDER | winapi::ES_LEFT | winapi::ES_MULTILINE |
-                    winapi::ES_AUTOVSCROLL |
-                    winapi::ES_NOHIDESEL | winapi::ES_AUTOVSCROLL,
+                winapi::WS_CHILD | winapi::WS_VISIBLE | winapi::WS_VSCROLL | winapi::WS_BORDER
+                    | winapi::ES_LEFT | winapi::ES_MULTILINE
+                    | winapi::ES_AUTOVSCROLL | winapi::ES_NOHIDESEL
+                    | winapi::ES_AUTOVSCROLL,
                 0,
                 0,
                 0,
@@ -133,8 +139,8 @@ impl<'a> SpVoice<'a> {
                 0,
                 wide_static.as_ptr(),
                 &0u16,
-                winapi::WS_CHILD | winapi::WS_VISIBLE | winapi_stub::SS_CENTER |
-                    winapi_stub::SS_NOPREFIX,
+                winapi::WS_CHILD | winapi::WS_VISIBLE | winapi_stub::SS_CENTER
+                    | winapi_stub::SS_NOPREFIX,
                 0,
                 0,
                 0,
@@ -150,8 +156,8 @@ impl<'a> SpVoice<'a> {
                 0,
                 wide_button.as_ptr(),
                 wide_settings.as_ptr(),
-                winapi::WS_TABSTOP | winapi::WS_VISIBLE | winapi::WS_CHILD |
-                    winapi::BS_DEFPUSHBUTTON,
+                winapi::WS_TABSTOP | winapi::WS_VISIBLE | winapi::WS_CHILD
+                    | winapi::BS_DEFPUSHBUTTON,
                 10,
                 10,
                 20,
@@ -188,6 +194,7 @@ impl<'a> SpVoice<'a> {
         toggle_window_visible(self.window)
     }
 
+    #[allow(dead_code)]
     pub fn get_status_word(&mut self) -> String {
         let status = self.get_status();
         self.last_read.get_slice(status.word_range())
@@ -203,6 +210,7 @@ impl<'a> SpVoice<'a> {
         self.last_read = string.into();
         set_window_text(self.edit, &self.last_read);
         unsafe { self.voice.Speak(self.last_read.as_ptr(), 19, null_mut()) };
+        self.last_update = None;
     }
 
     pub fn wait(&mut self) {
@@ -216,15 +224,18 @@ impl<'a> SpVoice<'a> {
 
     pub fn pause(&mut self) {
         unsafe { self.voice.Pause() };
+        self.last_update = None;
     }
 
     pub fn resume(&mut self) {
         unsafe { self.voice.Resume() };
+        self.last_update = None;
     }
 
     pub fn set_rate(&mut self, rate: i32) -> i32 {
         let rate = max(min(rate, 10), -10);
         unsafe { self.voice.SetRate(rate) };
+        self.last_update = None;
         self.get_rate()
     }
 
@@ -264,31 +275,41 @@ impl<'a> SpVoice<'a> {
 
     pub fn get_status(&mut self) -> winapi::SPVOICESTATUS {
         let mut status: winapi::SPVOICESTATUS = unsafe { mem::zeroed() };
-        unsafe { self.voice.GetStatus(&mut status, 0u16 as *mut *mut u16) };
+        unsafe { self.voice.GetStatus(&mut status, null_mut()) };
         status
     }
 
     fn set_notify_window_message(&mut self) {
         unsafe {
-            self.voice.SetNotifyWindowMessage(
-                self.window,
-                WM_SAPI_EVENT,
-                0,
-                0,
-            )
+            self.voice
+                .SetNotifyWindowMessage(self.window, WM_SAPI_EVENT, 0, 0)
         };
     }
 
     pub fn set_interest(&mut self, event: &[u64], queued: &[u64]) {
-        let queued = queued.iter().map(|&x| winapi::SPFEI(x)).fold(
-            0u64,
-            |acc, x| acc | x,
-        );
-        let event = event.iter().map(|&x| winapi::SPFEI(x)).fold(
-            queued,
-            |acc, x| acc | x,
-        );
+        let queued = queued
+            .iter()
+            .map(|&x| winapi::SPFEI(x))
+            .fold(0u64, |acc, x| acc | x);
+        let event = event
+            .iter()
+            .map(|&x| winapi::SPFEI(x))
+            .fold(queued, |acc, x| acc | x);
         unsafe { self.voice.SetInterest(event, queued) };
+    }
+}
+
+fn format_duration(d: chrono::Duration) -> String {
+    let h = d.num_hours();
+    let m = d.num_minutes() - d.num_hours() * 60;
+    let s = d.num_seconds() - d.num_minutes() * 60;
+    let ms = d.num_milliseconds() - d.num_seconds() * 1000;
+    if d.num_minutes() == 0 {
+        format!("{}.{}s", s, ms / 100)
+    } else if d.num_hours() == 0 {
+        format!("{}m:{:0>#2}.{}s", m, s, ms / 100)
+    } else {
+        format!("{}h:{:0>#2}m:{:0>#2}.{}s", h, m, s, ms / 100)
     }
 }
 
@@ -300,15 +321,44 @@ impl<'a> Windowed for SpVoice<'a> {
         l_param: winapi::LPARAM,
     ) -> Option<winapi::LRESULT> {
         match msg {
-            winapi::WM_DESTROY |
-            winapi::WM_QUERYENDSESSION |
-            winapi::WM_ENDSESSION => close(),
+            winapi::WM_DESTROY | winapi::WM_QUERYENDSESSION | winapi::WM_ENDSESSION => close(),
             WM_SAPI_EVENT => {
-                let word_range = self.get_status().word_range();
+                let status = self.get_status();
+                let word_range = status.word_range();
+                if word_range.end == 0 {
+                    // called before start of reading.
+                    self.last_update = None;
+                    return Some(0);
+                }
+                if status.dwRunningState == 3 {
+                    // called before end of reading.
+                    let window_title = "100.0% 0.0s rust_reader".into();
+                    set_console_title(&window_title);
+                    set_window_text(self.window, &window_title);
+                    self.last_update = None;
+                    return Some(0);
+                }
+                if let Some((ref old_time, ref old_word_range)) = self.last_update {
+                    if old_word_range.start == word_range.start {
+                        return Some(0);
+                    }
+                    let elapsed = chrono::Duration::from_std(old_time.elapsed())
+                        .expect("bad time diffrence.")
+                        .num_microseconds()
+                        .expect("bad time diffrence.");
+                    let new_rate =
+                        (elapsed as f64) / ((word_range.start - old_word_range.start) as f64);
+                    self.us_per_utf16.add(new_rate);
+                }
+                self.last_update = Some((Instant::now(), word_range.clone()));
+                let len_left = (self.last_read.len() - word_range.end) as f64;
+                let ms_left = len_left * self.us_per_utf16.mean()
+                    + (len_left * self.us_per_utf16.sample_variance()).sqrt();
                 let window_title = format!(
-                    "{:.1}% \"{}\" rust_reader",
-                    100.0 * ((word_range.end + 2) as f64) / (self.last_read.len() as f64),
-                    self.get_status_word()
+                    "{:.1}% {} \"{}\" rust_reader",
+                    100.0 * (word_range.start as f64) / (self.last_read.len() as f64),
+                    format_duration(chrono::Duration::microseconds(ms_left as i64)),
+                    self.last_read.get_slice(word_range.clone())
                 ).into();
                 set_console_title(&window_title);
                 set_window_text(self.window, &window_title);

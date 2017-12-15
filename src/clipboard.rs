@@ -16,9 +16,8 @@ pub fn clipboard_setup() {
         // this may fix the problem
         set_clipboard_string("").unwrap();
         // let us see if it did
-        get_clipboard_seq_num().expect(
-            "Lacks sufficient rights to access clipboard(WINSTA_ACCESSCLIPBOARD)",
-        );
+        get_clipboard_seq_num()
+            .expect("Lacks sufficient rights to access clipboard(WINSTA_ACCESSCLIPBOARD)");
     }
 }
 
@@ -56,7 +55,7 @@ pub fn send_key_event(vk: u16, flags: u32) {
             time: 0,
             dwExtraInfo: 0,
         };
-        let mut b = &mut input;
+        let b = &mut input;
         user32::SendInput(1, b, mem::size_of::<winapi::INPUT>() as i32);
     }
 }
@@ -77,7 +76,7 @@ pub fn press_ctrl_c() {
 }
 
 pub fn what_on_clipboard_seq_num(clip_num: u32, n: u8) -> bool {
-    for i in 0..(n as u32) {
+    for i in 0..u32::from(n) {
         if get_clipboard_seq_num().unwrap_or(clip_num) != clip_num {
             return true;
         }
@@ -87,7 +86,7 @@ pub fn what_on_clipboard_seq_num(clip_num: u32, n: u8) -> bool {
 }
 
 pub fn what_on_get_clipboard_string(n: u8) -> io::Result<String> {
-    for i in 0..(n as u32) {
+    for i in 0..u32::from(n) {
         match get_clipboard_string() {
             Ok(x) => return Ok(x),
             Err(_) => sleep(Duration::from_millis((2 as u64).pow(i))),
@@ -99,9 +98,8 @@ pub fn what_on_get_clipboard_string(n: u8) -> io::Result<String> {
 pub fn get_text() -> io::Result<String> {
     println!("getting text");
     let old_clip = what_on_get_clipboard_string(6);
-    let old_clip_num = get_clipboard_seq_num().expect(
-        "Lacks sufficient rights to access clipboard(WINSTA_ACCESSCLIPBOARD)",
-    );
+    let old_clip_num = get_clipboard_seq_num()
+        .expect("Lacks sufficient rights to access clipboard(WINSTA_ACCESSCLIPBOARD)");
     press_ctrl_c();
     if !what_on_clipboard_seq_num(old_clip_num, 6) {
         return Err(io::Error::new(io::ErrorKind::Other, "oh no!"));
